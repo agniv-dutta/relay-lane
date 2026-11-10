@@ -1,0 +1,24 @@
+{
+  "latency": {
+    "ttft": {"dist": "lognormal", "mu": -1.6, "sigma": 0.5},
+    "per_token": {"dist": "lognormal", "mu": -5.0, "sigma": 0.3},
+    "load_slowdown": {"enabled": true, "factor_per_request": 0.15, "cap": 5.0}
+  },
+  "limits": {
+    "rpm": 30,
+    "tpm": 6000,
+    "rpd": 0,
+    "max_concurrency": 4
+  },
+  "failures": {
+    "error_rate": 0.02,
+    "hang_rate": 0.01,
+    "hang_seconds": [5.0, 30.0],
+    "slow_success_rate": 0.05,
+    "slow_success_extra_ms": [1000.0, 5000.0]
+  },
+  "content": {
+    "chunks_path": "data/chunks/chunks_400.jsonl",
+    "max_citations": 3
+  }
+}

@@ -1,0 +1,14 @@
+Stand-in limitations (least like real Groq):
+1. Latency model treats TTFT and per-token delay as independent lognormals; real latency likely correlates with prompt length and load.
+2. No network jitter, TCP/TLS handshake, or cold-start effects.
+3. Rate limiting uses simple sliding windows; real Groq uses token buckets with burst capacity and per-model windows.
+4. RPD NOT observed; set to 0 (default/estimated)
+5. Failure injection is i.i.d. Bernoulli; real errors are bursty and correlated with load.
+6. Hang/slow-success rates are estimated crudely (top-1% latency); not directly observable from probe.
+7. Canned reply content is fixed and does not reflect model variability or prompt-dependent length.
+8. Load slowdown assumed linear in in-flight count; real scheduling may be nonlinear.
+9. No prompt-dependent output length; completion length fixed.
+10. No streaming backpressure or client-disconnect handling.
+11. Lognormal fit may underfit tails; check KS p-values in config.
+12. Stand-in does not simulate regional routing, model warm-up, or version changes.
+15. No probe data provided; config uses defaults.

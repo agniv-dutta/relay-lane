@@ -1,0 +1,30 @@
+# Eval question set. Add 20+ questions.
+# Fields:
+#   question: str
+#   expected_answer_notes: str (what a correct answer should contain)
+#   answerable: bool
+#   expected_source: optional "paper_id/page" (e.g. "1706.03762/3") or null
+- question: "What is scaled dot-product attention?"
+  expected_answer_notes: "dot product of Q and K divided by sqrt(dk), softmax, times V"
+  answerable: true
+  expected_source: "1706.03762/3"
+
+- question: "What BLEU score on WMT 2014 English-to-German?"
+  expected_answer_notes: "28.4 BLEU"
+  answerable: true
+  expected_source: "1706.03762/8"
+
+- question: "What is the capital of France?"
+  expected_answer_notes: "not covered by the papers"
+  answerable: false
+  expected_source: null
+
+- question: "How many attention heads in the base model?"
+  expected_answer_notes: "8 heads"
+  answerable: true
+  expected_source: "1706.03762/5"
+
+- question: "What optimizer is used?"
+  expected_answer_notes: "Adam with beta1, beta2, epsilon"
+  answerable: true
+  expected_source: "1706.03762/7"
