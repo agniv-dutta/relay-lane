@@ -1,0 +1,34 @@
+:root {
+  --color-mondo: #1B3FA0;
+  --color-infield: #0C1A47;
+  --color-lane: #EEF2F8;
+  --color-baton: #FFD21F;
+  --color-false: #E03A3E;
+  --color-split: #3DAA7D;
+
+  --font-display: "Anybody", system-ui, sans-serif;
+  --font-body: "Source Serif 4", Georgia, serif;
+
+  --stretch: 100;
+
+  --step--2: 0.694rem;
+  --step--1: 0.833rem;
+  --step-0: 1rem;
+  --step-1: 1.2rem;
+  --step-2: 1.44rem;
+  --step-3: 1.728rem;
+  --step-4: 2.074rem;
+  --step-5: 2.488rem;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-8: 3rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --stretch: 100; }
+}

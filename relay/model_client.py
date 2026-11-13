@@ -65,6 +65,8 @@ class ModelClient:
         temperature: float = 0.0,
         max_tokens: int = 512,
         model_override: str | None = None,
+        on_token=None,
+        response_format=None,
     ) -> ModelResponse:
         model = model_override or self.model
         payload = {
@@ -74,6 +76,8 @@ class ModelClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
         start = time.perf_counter()
         first_token = None
         collected: list[str] = []
@@ -115,6 +119,11 @@ class ModelClient:
                             if first_token is None:
                                 first_token = time.perf_counter()
                             collected.append(content)
+                            if on_token is not None:
+                                try:
+                                    await on_token(content)
+                                except Exception:
+                                    pass
         except (RateLimitError, HTTPError):
             raise
         except Exception as e:

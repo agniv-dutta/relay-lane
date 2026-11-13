@@ -15,7 +15,9 @@
     "hang_rate": 0.01,
     "hang_seconds": [5.0, 30.0],
     "slow_success_rate": 0.05,
-    "slow_success_extra_ms": [1000.0, 5000.0]
+    "slow_success_extra_ms": [1000.0, 5000.0],
+    "malformed_json_rate": 0.1,
+    "bad_citation_rate": 0.1
   },
   "content": {
     "chunks_path": "data/chunks/chunks_400.jsonl",

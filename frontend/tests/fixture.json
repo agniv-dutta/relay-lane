@@ -1,0 +1,9 @@
+[
+  {"type": "accepted", "data": {"request_id": "r1", "queue_position": 0}},
+  {"type": "step_start", "data": {"step": "understand", "lane": 1}},
+  {"type": "first_token", "data": {}},
+  {"type": "token", "data": {"text": "Hello "}},
+  {"type": "token", "data": {"text": "world"}},
+  {"type": "step_end", "data": {"step": "understand", "lane": 1, "model_ms": 100, "tokens_in": 10, "tokens_out": 2}},
+  {"type": "final", "data": {"status": "ok", "answer": "Hello world", "citations": [], "refusal_reason": null, "grade_hint": "correct", "total_ms": 200}}
+]

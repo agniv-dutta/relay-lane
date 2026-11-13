@@ -1,0 +1,57 @@
+@import "./tokens.css";
+
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; height: 100%; }
+body {
+  font-family: var(--font-body);
+  background: var(--color-mondo);
+  color: var(--color-lane);
+  font-size: var(--step-0);
+  line-height: 1.6;
+}
+h1, h2, h3, .lane-label, .numeral {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" var(--stretch), "wght" 700;
+  font-variant-numeric: tabular-nums;
+}
+a { color: var(--color-baton); }
+button {
+  font-family: var(--font-display);
+  background: var(--color-baton);
+  color: var(--color-infield);
+  border: none;
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  font-weight: 700;
+}
+button:focus-visible {
+  outline: 3px solid var(--color-baton);
+  outline-offset: 2px;
+}
+input, select, textarea {
+  font-family: var(--font-body);
+  background: var(--color-infield);
+  color: var(--color-lane);
+  border: 1px solid var(--color-lane);
+  padding: var(--space-2);
+}
+.app-shell {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  min-height: 100vh;
+}
+.rail {
+  background: var(--color-infield);
+  padding: var(--space-4);
+  font-family: var(--font-display);
+}
+.rail a { display: block; margin-bottom: var(--space-2); text-decoration: none; font-family: var(--font-display); }
+.main { padding: var(--space-4); }
+*:focus-visible {
+  outline: 2px solid #FFD21F;
+  outline-offset: 2px;
+}
+@media (max-width: 720px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .rail { display: flex; gap: var(--space-3); overflow-x: auto; }
+}

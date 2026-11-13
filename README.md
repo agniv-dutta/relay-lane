@@ -19,7 +19,7 @@ Multi-step LLM pipeline answering questions from 3 arXiv papers.
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e .
-cp .env.example .env
+Copy-Item .env.example .env
 # fill in GROQ_API_KEY
 ```
 
@@ -32,6 +32,20 @@ cp .env.example .env
   - Outputs: `data/raw/` (PDFs, gitignored), `data/extracted/*.json`, `data/chunks/chunks_*.jsonl`
 - Pipeline: `python -m relay.pipeline --question "..."` (options: `--chunks`, `--k`, `--trace-out`, `--rpm`, `--tpm`, `--rpd`, `--give-up-time`, `--disable-retries`, `--small-model`)
 - Loadgen: `python -m loadgen.run` (TODO)
-- Analysis: `python -m analysis.make_tables` (reads `results/results.csv`)
+- Token estimation uses chars/4 (honest, simple). Estimator error is logged per call (estimated vs actual tokens_in/out) and corrected against the bucket. Validate against `usage.prompt_tokens` from real Groq responses; stand-in uses the same chars/4 rule, so stand-in-only error is not meaningful.
 - Eval: `python -m eval.run` (TODO)
 - Tests: `pytest`
+
+## Frontend
+
+\\\ash
+cd frontend
+npm install
+npm run dev       # http://localhost:5173, proxies /api to :8000
+npm run build     # outputs frontend/dist
+npm run typecheck # tsc --noEmit
+\\\`n
+Production: \
+pm run build\ then serve via FastAPI (\elay.api\ mounts \rontend/dist\ at \/\). Run \.\prod.ps1\.
+
+Dev (Windows): \.\dev.ps1\ starts stand-in (:8001), relay API (:8000), and Vite (:5173).

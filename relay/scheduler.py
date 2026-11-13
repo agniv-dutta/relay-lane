@@ -60,7 +60,7 @@ class DailyCounter:
 
 def estimate_tokens(messages: list[dict[str, str]]) -> int:
     text = " ".join(m.get("content", "") for m in messages)
-    return max(1, len(text) // 4 + 64)
+    return max(1, len(text) // 4)
 
 
 class Scheduler:
@@ -87,8 +87,10 @@ class Scheduler:
         self.retries_enabled = retries_enabled
         self.base_backoff = base_backoff
         self.backoff_cap = backoff_cap
+        self.emit = None  # optional async callable(event_type, payload)
         self._in_flight = 0
         self._in_flight_lock = asyncio.Lock()
+        self.decisions: list[dict[str, Any]] = []
 
     def pressure(self) -> float:
         now = time.time()
@@ -103,11 +105,35 @@ class Scheduler:
     def daily_exhausted(self) -> bool:
         return self.daily.exhausted()
 
-    async def _acquire_tokens(self, est: int, deadline: float) -> None:
+    async def _acquire_tokens(self, est: int, deadline: float, trace=None) -> None:
+        # If the estimate exceeds bucket capacity, do not clamp silently.
+        # Raise so the caller can degrade (shrink passages) or refuse; the
+        # reserved estimate must equal what is sent.
+        if est > self.tpm_bucket.capacity and self.tpm_bucket.capacity > 0:
+            raise DeadlineExceeded(
+                f"token budget exceeded: estimate {est} > tpm capacity {self.tpm_bucket.capacity:.0f}"
+            )
+        if 1 > self.rpm_bucket.capacity and self.rpm_bucket.capacity > 0:
+            raise DeadlineExceeded(
+                f"token budget exceeded: rpm estimate 1 > rpm capacity {self.rpm_bucket.capacity:.0f}"
+            )
+
         while True:
             now = time.time()
             if now >= deadline:
-                raise DeadlineExceeded("token bucket wait exceeded deadline")
+                # Determine which gate blocked.
+                self.rpm_bucket.refill(now)
+                self.tpm_bucket.refill(now)
+                if self.rpm_bucket.tokens < 1:
+                    gate = "rpm"
+                    detail = f"rpm tokens={self.rpm_bucket.tokens:.1f}/{self.rpm_bucket.capacity:.0f}"
+                elif self.tpm_bucket.tokens < est:
+                    gate = "tpm"
+                    detail = f"tpm tokens={self.tpm_bucket.tokens:.1f}/{self.tpm_bucket.capacity:.0f} est={est}"
+                else:
+                    gate = "concurrency"
+                    detail = f"in_flight={self._in_flight}/{self.max_concurrency}"
+                raise DeadlineExceeded(f"token bucket wait exceeded deadline: blocked by {gate} ({detail})")
             self.rpm_bucket.refill(now)
             self.tpm_bucket.refill(now)
             if self.rpm_bucket.tokens >= 1 and self.tpm_bucket.tokens >= est:
@@ -150,6 +176,8 @@ class Scheduler:
         model: str | None = None,
         temperature: float = 0.0,
         max_tokens: int = 512,
+        on_token=None,
+        response_format=None,
     ) -> Any:
         est = estimated_tokens if estimated_tokens is not None else estimate_tokens(messages)
         if deadline is None:
@@ -195,7 +223,7 @@ class Scheduler:
         retry_time = 0.0
         attempts = 0
         try:
-            await self._acquire_tokens(est, deadline)
+            await self._acquire_tokens(est, deadline, trace=trace)
 
             while True:
                 if time.time() >= deadline:
@@ -203,7 +231,7 @@ class Scheduler:
                 attempts += 1
                 t0 = time.time()
                 try:
-                    resp = await client.stream(messages, temperature=temperature, max_tokens=max_tokens, model_override=model)
+                    resp = await client.stream(messages, temperature=temperature, max_tokens=max_tokens, model_override=model, on_token=on_token, response_format=response_format)
                     step.model_time_ms = round((time.time() - t0) * 1000, 2)
                     step.first_token_ms = resp.first_token_ms
                     step.prompt_tokens = resp.prompt_tokens
@@ -219,6 +247,8 @@ class Scheduler:
                         decision = {"decision": "failed", "reason": "rate limited, no retry", "status": 429}
                         if trace is not None:
                             trace.decisions.append(decision)
+                        if self.emit is not None:
+                            await self.emit("retry", {"attempt": attempts, "backoff_ms": 0, "reason": "rate limited, no retry"})
                         step.extra["scheduler_decision"] = decision
                         raise
                     backoff = self._backoff(attempts, e.retry_after, deadline)
@@ -227,6 +257,8 @@ class Scheduler:
                     decision = {"decision": "retry", "reason": "429 rate limited", "backoff_s": round(backoff, 3), "attempt": attempts}
                     if trace is not None:
                         trace.decisions.append(decision)
+                    if self.emit is not None:
+                        await self.emit("retry", {"attempt": attempts, "backoff_ms": int(backoff * 1000), "reason": "429 rate limited"})
                 except HTTPError as e:
                     if e.status < 500:
                         raise
@@ -242,6 +274,8 @@ class Scheduler:
                     decision = {"decision": "retry", "reason": f"5xx {e.status}", "backoff_s": round(backoff, 3), "attempt": attempts}
                     if trace is not None:
                         trace.decisions.append(decision)
+                    if self.emit is not None:
+                        await self.emit("retry", {"attempt": attempts, "backoff_ms": int(backoff * 1000), "reason": f"5xx {e.status}"})
                 except Exception:
                     raise
         finally:
