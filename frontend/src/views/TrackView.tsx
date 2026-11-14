@@ -9,6 +9,13 @@ const LANES = [
   { n: 5, name: "verify" },
 ];
 
+const ERROR_TEXT: Record<string, string> = {
+  model_endpoint_unreachable: "The model service couldn't be reached. This is a setup problem, not a limit.",
+  unparseable_model_output: "The model returned output the pipeline couldn't read. The request failed; it was not treated as an answer.",
+  cannot_fit_budget: "The request can't fit the token budget — even one passage exceeds the cap after dropping passages. Nothing was sent to the model for the failing step.",
+  rate_limited: "The model service rate-limited this request and the retry budget ran out. This is a limit, not a setup problem — wait for the window to reset and try again.",
+};
+
 export default function TrackView() {
   const { state, ask, reset } = useAsk();
   const [question, setQuestion] = useState("");
@@ -153,9 +160,9 @@ export default function TrackView() {
           {state.retries.map((r, i) => <div key={i}>retry {r.attempt}: {r.reason} {r.backoff_ms}ms</div>)}
         </div>
       )}
-      {state.degrades.length > 0 && (
+      {state.degrades.filter((d) => d.rung !== 0).length > 0 && (
         <div style={{ color: "var(--color-baton)" }}>
-          {state.degrades.map((d, i) => <div key={i}>degraded rung {d.rung}: {d.reason}</div>)}
+          {state.degrades.filter((d) => d.rung !== 0).map((d, i) => <div key={i}>degraded rung {d.rung}: {d.reason}</div>)}
         </div>
       )}
 
@@ -165,32 +172,76 @@ export default function TrackView() {
         </div>
         {state.final && (
           <div style={{ marginTop: "0.5rem", fontSize: "0.85rem", opacity: 0.8 }}>
-            {state.final.refusal_reason && <div>{state.final.refusal_reason}</div>}
+            {state.final.refusal_reason && state.final.status !== "error" && <div>{ERROR_TEXT[state.final.refusal_reason] ?? state.final.refusal_reason}</div>}
             <div>tokens in/out: {state.steps.reduce((a, s) => a + (s.tokens_in || 0), 0)} / {state.steps.reduce((a, s) => a + (s.tokens_out || 0), 0)}</div>
             <div>setting: {setting}</div>
-            <div>first token: {state.firstTokenMs?.toFixed(0)} ms, total: {state.totalMs?.toFixed(0)} ms</div>
+            <div>
+              first token:{" "}
+              {state.firstTokenMs !== null
+                ? `${state.firstTokenMs.toFixed(0)} ms`
+                : state.final.status === "error" || state.final.status === "timeout"
+                  ? "no first token: failed before one"
+                  : "none"}
+              {state.totalMs !== null && <>, total: {state.totalMs.toFixed(0)} ms</>}
+            </div>
           </div>
         )}
-        {state.error && <div style={{ color: "var(--color-false)" }}>{state.error}</div>}
+        {(state.error || state.final?.status === "error") && (
+          <div style={{ marginTop: "0.5rem", color: "var(--color-false)" }}>
+            <div>
+              {ERROR_TEXT[state.final?.refusal_reason ?? ""] ??
+                "The request failed. This is a setup problem, not a limit."}
+            </div>
+            <details style={{ opacity: 0.85 }}>
+              <summary>details</summary>
+              <div style={{ fontFamily: "monospace", fontSize: "0.8rem", wordBreak: "break-word" }}>
+                {state.final?.detail ?? state.error ?? state.final?.answer ?? state.final?.refusal_reason}
+              </div>
+            </details>
+          </div>
+        )}
       </div>
 
       {/* photo-finish strip */}
-      {state.totalMs !== null && state.totalMs > 0 && (
-        <div style={{ marginTop: "1rem" }}>
-          <svg width={barW} height={24}>
-            <rect x={0} y={0} width={waitingW} height={24} fill="var(--color-lane)" />
-            <rect x={waitingW} y={0} width={workingW} height={24} fill="var(--color-baton)" />
-            <rect x={waitingW + workingW} y={0} width={retryingW} height={24} fill="var(--color-false)" />
-            {ftStripX !== null && (
-              <line x1={ftStripX} y1={0} x2={ftStripX} y2={24} stroke="var(--color-baton)" strokeWidth="2" />
-            )}
-          </svg>
-          <div style={{ fontSize: "0.8rem", opacity: 0.8 }}>
-            first token at {state.firstTokenMs?.toFixed(0)} ms, {state.firstTokenMs !== null && state.totalMs !== null && state.firstTokenMs < (state.totalMs / 2) ? "before" : "after"} the wait
-            {" · "}waiting {waitingMs.toFixed(0)}ms · working {workingMs.toFixed(0)}ms · retrying {retryingMs.toFixed(0)}ms
+      {state.totalMs !== null && state.totalMs > 0 && (() => {
+        const failed = state.final?.status === "error" || state.final?.status === "timeout";
+        return (
+          <div style={{ marginTop: "1rem" }}>
+            <svg width={barW} height={24}>
+              <defs>
+                <pattern id="hatch" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+                  <rect width="8" height="8" fill="var(--color-false)" />
+                  <line x1="0" y1="0" x2="0" y2="8" stroke="var(--color-infield)" strokeWidth="3" />
+                </pattern>
+              </defs>
+              {failed ? (
+                <rect x={0} y={0} width={barW} height={24} fill="url(#hatch)" stroke="var(--color-false)" strokeWidth="1" />
+              ) : (
+                <>
+                  <rect x={0} y={0} width={waitingW} height={24} fill="var(--color-lane)" />
+                  <rect x={waitingW} y={0} width={workingW} height={24} fill="var(--color-baton)" />
+                  <rect x={waitingW + workingW} y={0} width={retryingW} height={24} fill="var(--color-false)" />
+                  {ftStripX !== null && (
+                    <line x1={ftStripX} y1={0} x2={ftStripX} y2={24} stroke="var(--color-baton)" strokeWidth="2" />
+                  )}
+                </>
+              )}
+            </svg>
+            <div style={{ fontSize: "0.8rem", opacity: 0.8 }}>
+              {failed ? (
+                <>failed after {state.totalMs.toFixed(0)} ms, no first token</>
+              ) : (
+                <>
+                  {state.firstTokenMs !== null
+                    ? <>first token at {state.firstTokenMs.toFixed(0)} ms, {state.firstTokenMs < (state.totalMs / 2) ? "before" : "after"} the wait</>
+                    : <>no first token yet</>}
+                  {" · "}waiting {waitingMs.toFixed(0)}ms · working {workingMs.toFixed(0)}ms · retrying {retryingMs.toFixed(0)}ms
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {hasRun && (
         <div style={{ marginTop: "1rem" }}>

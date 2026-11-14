@@ -12,12 +12,11 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 load_dotenv()
 
-from relay.model_client import ModelClient
+from relay.model_client import ModelClient, ModelEndpointUnreachable, RateLimitError
 from relay.pipeline import run_pipeline
 from relay.retrieval import BM25Retriever, OverlapReranker, NoOpReranker
 from relay.scheduler import Scheduler, DeadlineExceeded
@@ -30,7 +29,7 @@ def parse_setting(s: str):
     m = re.search(r"chunk(\d+)", s)
     if m:
         chunk_size = int(m.group(1))
-    m = re.search(r"k(\d+)", s)
+    m = re.search(r"[-_]k(\d+)", s)
     if m:
         k = int(m.group(1))
     if "rerank" in (s or "").lower() and "norerank" not in (s or "").lower() and "no_rerank" not in (s or "").lower() and "no-rerank" not in (s or "").lower():
@@ -100,6 +99,27 @@ def _find_chunk(chunk_id: str):
     return None
 
 
+async def _verify_model(base_url: str, api_key: str, model_id: str) -> dict:
+    """Fail fast: is model_id served by GET <base>/models?"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"Model endpoint unreachable at {base_url}/models ({type(e).__name__}: {e})."}
+    if r.status_code in (404, 405):
+        return {"ok": False, "error": f"Model endpoint not served (HTTP {r.status_code}) at {base_url}/models."}
+    if r.status_code != 200:
+        return {"ok": False, "error": f"GET {base_url}/models returned HTTP {r.status_code}: {r.text[:200]}"}
+    try:
+        ids = [m.get("id") for m in r.json().get("data", [])]
+    except Exception:
+        return {"ok": False, "error": f"Could not parse model list from {base_url}/models."}
+    if model_id not in ids:
+        return {"ok": False, "error": f"MODEL_ID '{model_id}' is not in GET {base_url}/models ({len(ids)} models available). Run scripts/list_models.py."}
+    return {"ok": True, "error": None}
+
+
 def _probe_limits():
     """Read RPM/TPM limits from results/probe_raw.jsonl if available."""
     p = Path("results/probe_raw.jsonl")
@@ -143,21 +163,52 @@ def _standin_limits():
         return None, None
 
 
+def _model_base(source: str) -> tuple[str, str, str]:
+    """(base_url, api_key, model_id) with .env via python-dotenv."""
+    if source == "real":
+        base = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+        key = os.getenv("GROQ_API_KEY", "")
+        model = os.getenv("MODEL_ID") or os.getenv("MODEL_NAME") or ""
+    else:
+        base = os.getenv("STANDIN_BASE_URL", "http://127.0.0.1:8001/openai/v1").rstrip("/")
+        key = "dummy"
+        # the stand-in only serves its own id; MODEL_ID is the real-service model
+        model = "standin-model"
+    return base, key, model
+
+
 @app.get("/api/health")
 async def health():
-    # stand-in reachability
-    standin_reachable = False
+    # model-endpoint reachability: GET <base>/models (no keys echoed)
+    base, _, model = _model_base("stand-in")
+    model_endpoint_ok = False
+    model_id_available = None
+    endpoint_error = None
     try:
         import httpx
-        base = os.getenv("STANDIN_BASE_URL", "http://localhost:8000")
-        async with httpx.AsyncClient(base_url=base, timeout=2.0) as c:
-            r = await c.get("/health")
-            standin_reachable = r.status_code == 200
-    except Exception:
-        standin_reachable = False
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(f"{base}/models")
+            model_endpoint_ok = r.status_code == 200
+            if model_endpoint_ok:
+                try:
+                    ids = [m.get("id") for m in r.json().get("data", [])]
+                    model_id_available = model in ids
+                except Exception:
+                    model_id_available = None
+            else:
+                endpoint_error = f"HTTP {r.status_code} from {base}/models"
+    except Exception as e:
+        endpoint_error = f"{type(e).__name__}: {e}"
+    # stand-in reachability (legacy field)
+    standin_reachable = model_endpoint_ok
     return {
         "ok": True,
         "standin_reachable": standin_reachable,
+        "model_endpoint_ok": model_endpoint_ok,
+        "model_id_available": model_id_available,
+        "model_base_url": base,
+        "model_id": model,
+        "endpoint_error": endpoint_error,
         "results_csv_present": Path("results/results.csv").exists(),
         "real_requests_used_today": _real_used["calls"],
         "real_cap": REAL_CALL_CAP,
@@ -323,14 +374,20 @@ async def ask(request: Request):
         if not _real_cap_check(1000):
             return JSONResponse(status_code=429, content={"detail": "real daily cap reached"})
 
-    if source == "real":
-        base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-        api_key = os.getenv("GROQ_API_KEY")
-    else:
-        base_url = os.getenv("STANDIN_BASE_URL", "http://localhost:8000")
-        api_key = "dummy"
+    base_url, api_key, model_id = _model_base(source)
 
-    client = ModelClient(base_url=base_url, api_key=api_key, model=os.getenv("MODEL_NAME", "llama-3.1-8b-instant"))
+    if source == "real":
+        # Fail fast: MODEL_ID must be configured and present in GET /models.
+        if not model_id:
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "MODEL_ID is not set. Run scripts/list_models.py and set MODEL_ID in .env."},
+            )
+        verify = await _verify_model(base_url, api_key, model_id)
+        if not verify["ok"]:
+            return JSONResponse(status_code=500, content={"detail": verify["error"]})
+
+    client = ModelClient(base_url=base_url, api_key=api_key, model=model_id)
     scheduler = Scheduler(
         max_concurrency=int(os.getenv("MAX_CONCURRENCY", "4")),
         retry_budget=int(os.getenv("MAX_RETRIES", "2")),
@@ -375,6 +432,8 @@ async def ask(request: Request):
                 status = "refused" if trace.refused else "ok"
                 if trace.refusal_reason == "unparseable_model_output":
                     status = "error"
+                elif trace.refusal_reason == "cannot_fit_budget":
+                    status = "cannot_fit_budget"
                 # grade hint
                 grade_hint = "refused_correctly" if trace.refused else "correct"
                 await emit("final", {
@@ -387,6 +446,29 @@ async def ask(request: Request):
                 })
             except DeadlineExceeded as e:
                 await emit("final", {"status": "timeout", "answer": str(e), "citations": [], "refusal_reason": str(e), "grade_hint": "timeout", "total_ms": None})
+            except ModelEndpointUnreachable as e:
+                # setup problem, never a limit; raw detail kept for the trace/details toggle
+                TRACES[request_id] = {"error": "model_endpoint_unreachable", "detail": e.detail}
+                await emit("final", {
+                    "status": "error",
+                    "answer": "The model service couldn't be reached. This is a setup problem, not a limit.",
+                    "citations": [],
+                    "refusal_reason": "model_endpoint_unreachable",
+                    "detail": e.detail,
+                    "grade_hint": "error",
+                    "total_ms": None,
+                })
+            except RateLimitError as e:
+                # limit exhausted, not a setup problem: plain message + raw detail
+                await emit("final", {
+                    "status": "error",
+                    "answer": "The model service rate-limited this request and the retry budget ran out. This is a limit, not a setup problem — wait for the window to reset and try again.",
+                    "citations": [],
+                    "refusal_reason": "rate_limited",
+                    "detail": str(e),
+                    "grade_hint": "error",
+                    "total_ms": None,
+                })
             except Exception as e:
                 await emit("final", {"status": "error", "answer": str(e), "citations": [], "refusal_reason": str(e), "grade_hint": "error", "total_ms": None})
             finally:
@@ -433,5 +515,33 @@ async def preload_retrievers():
 
 
 _dist = Path("frontend/dist")
-if _dist.exists():
-    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
+
+
+# --- routing order matters: all /api routes above are registered first. ---
+
+@app.api_route(
+    "/api/{full_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def api_unknown(full_path: str):
+    """Any unknown /api/* path: JSON 404 with a clear message (never the SPA, never 405)."""
+    return JSONResponse(
+        status_code=404,
+        content={"detail": f"Unknown API route: /api/{full_path}. See /docs for available routes."},
+    )
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    """Unknown non-API paths: serve the static file if it exists, else the SPA index (GET only)."""
+    if not _dist.exists():
+        return JSONResponse(status_code=404, content={"detail": "frontend not built (run npm run build)"})
+    target = (_dist / full_path).resolve()
+    try:
+        target.relative_to(_dist.resolve())
+    except ValueError:
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+    if target.is_file():
+        return FileResponse(target)
+    return FileResponse(_dist / "index.html")

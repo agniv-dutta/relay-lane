@@ -10,9 +10,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from relay.model_client import ModelClient
+from relay.model_client import ModelClient, RateLimitError
 from relay.retrieval import BM25Retriever, Chunk
-from relay.scheduler import Scheduler, DailyBudgetExhausted, DeadlineExceeded
+from relay.scheduler import Scheduler, DailyBudgetExhausted, DeadlineExceeded, TokenBudgetExceeded
 from relay.trace import Trace, StepTrace
 
 
@@ -22,8 +22,8 @@ LANE_MAP = {"understand": 1, "retrieve": 2, "decide": 3, "draft": 4, "verify": 5
 DEFAULT_CHUNKS = "data/chunks/chunks_400.jsonl"
 
 
-class TokenBudgetExceeded(Exception):
-    pass
+# re-exported for callers/tests that import it from here
+__all__ = ["TokenBudgetExceeded", "UnparseableOutput", "run_pipeline"]
 
 
 class UnparseableOutput(Exception):
@@ -446,11 +446,15 @@ async def run_pipeline(
 
         # 5. verify (code-based always; skip any LLM verify pass when degraded)
         step = trace.new_step("verify")
+        if emit is not None:
+            await emit("step_start", {"step": "verify", "lane": 5})
         ok, problems = verify_citations(draft, chunks)
         step.extra["problems"] = problems
         step.extra["ok"] = ok
         step.extra["degradation_level"] = level
         step.extra["skipped_llm_verify"] = bool(level >= 2)
+        if emit is not None:
+            await emit("step_end", {"step": "verify", "lane": 5, "model_ms": 0, "tokens_in": None, "tokens_out": None})
         if ok:
             trace.final_answer = draft
             step.finish()
@@ -463,9 +467,13 @@ async def run_pipeline(
             draft2 = await step_draft(scheduler, client, trace, question, chunks, strict=True, model=model_for_draft, max_tokens=max_tok, emit=emit)
             ok2, problems2 = verify_citations(draft2, chunks)
             step2 = trace.new_step("verify")
+            if emit is not None:
+                await emit("step_start", {"step": "verify", "lane": 5})
             step2.extra["problems"] = problems2
             step2.extra["ok"] = ok2
             step2.extra["regenerated"] = True
+            if emit is not None:
+                await emit("step_end", {"step": "verify", "lane": 5, "model_ms": 0, "tokens_in": None, "tokens_out": None})
             if ok2:
                 trace.final_answer = draft2
                 step2.finish()
@@ -490,12 +498,24 @@ async def run_pipeline(
 
     except DailyBudgetExhausted:
         return _daily_exhausted(trace)
+    except RateLimitError as e:
+        # attach the trace so callers (check_tokens 429 diagnostics) can read
+        # the scheduler's logged decision: bucket state, reserved tokens, reason
+        e.trace = trace
+        raise
     except TokenBudgetExceeded as e:
+        # not a wait: the request cannot fit the token budget even after
+        # dropping/truncating passages. Status is cannot_fit_budget, never timeout.
         trace.refused = True
-        trace.refusal_reason = "cannot fit the token budget"
+        trace.refusal_reason = "cannot_fit_budget"
         step = trace.new_step("refuse")
         step.extra["reason"] = str(e)
-        trace.final_answer = "Cannot fit the token budget for this request."
+        trace.decisions.append({"decision": "refused", "reason": "cannot_fit_budget", "detail": str(e)})
+        trace.final_answer = (
+            "The provided papers cannot be used to answer this question within the "
+            "token budget: the prompt exceeds the cap even after dropping passages. "
+            "Nothing was sent to the model for the failing step."
+        )
         step.finish()
         trace.finish()
         return trace
@@ -560,7 +580,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.model is None:
-        args.model = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
+        args.model = os.getenv("MODEL_ID") or os.getenv("MODEL_NAME") or "standin-model"
     if args.base_url is None:
         args.base_url = os.getenv("GROQ_BASE_URL", None)
     if args.api_key is None:

@@ -220,7 +220,7 @@ def main():
     args = parser.parse_args()
 
     if args.model is None:
-        args.model = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
+        args.model = os.getenv("MODEL_ID") or os.getenv("MODEL_NAME") or "standin-model"
     if args.source == "real" and not args.api_key and not os.getenv("GROQ_API_KEY"):
         print("WARNING: no GROQ_API_KEY set")
 

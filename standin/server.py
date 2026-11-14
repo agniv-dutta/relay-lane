@@ -86,6 +86,9 @@ def _limits():
         "tpm": int(L.get("tpm", 6000)),
         "rpd": int(L.get("rpd", 0)),
         "max_concurrency": int(L.get("max_concurrency", 4)),
+        # sliding-window length in seconds; configurable so it can match the
+        # window observed against the real service
+        "window_seconds": float(L.get("window_seconds", 60)),
     }
 
 
@@ -97,11 +100,10 @@ def _sem():
 
 
 def _prune_windows(now):
-    rpm = _limits()["rpm"]
-    tpm = _limits()["tpm"]
-    while _rpm_events and now - _rpm_events[0] > 60:
+    win = _limits()["window_seconds"]
+    while _rpm_events and now - _rpm_events[0] > win:
         _rpm_events.popleft()
-    while _tpm_events and now - _tpm_events[0][0] > 60:
+    while _tpm_events and now - _tpm_events[0][0] > win:
         _tpm_events.popleft()
 
 
@@ -123,17 +125,18 @@ def _rate_state(now):
 
 def _check_limits(est_tokens, now):
     st = _rate_state(now)
+    win = _limits()["window_seconds"]
     if st["rpd_limit"] > 0 and st["rpd_used"] >= st["rpd_limit"]:
         return False, "rpd", 3600.0
     if st["rpm_used"] >= st["rpm_limit"]:
         if _rpm_events:
-            ra = 60 - (now - _rpm_events[0])
+            ra = win - (now - _rpm_events[0])
         else:
             ra = 1.0
         return False, "rpm", max(0.5, ra)
     if st["tpm_used"] + est_tokens > st["tpm_limit"]:
         if _tpm_events:
-            ra = 60 - (now - _tpm_events[0][0])
+            ra = win - (now - _tpm_events[0][0])
         else:
             ra = 1.0
         return False, "tpm", max(0.5, ra)
@@ -150,8 +153,9 @@ def _record_usage(tokens, now):
 def _reset_time_remaining(window_deque, now):
     if not window_deque:
         return 0
+    win = _limits()["window_seconds"]
     oldest = window_deque[0] if not isinstance(window_deque[0], tuple) else window_deque[0][0]
-    return max(0, 60 - (now - oldest))
+    return max(0, win - (now - oldest))
 
 
 def _headers_for(st, now):
@@ -206,6 +210,11 @@ def _parse_chunk_ids(text):
     return re.findall(r"\[\s*[^\],]+?\s*,\s*\d+\s*,\s*([^\]]+?)\s*\]", text)
 
 
+def _parse_citation_triples(text):
+    # full (paper_id, page, chunk_id) triples as they appear in passages
+    return re.findall(r"\[\s*([^\],]+?)\s*,\s*(\d+)\s*,\s*([^\]]+?)\s*\]", text)
+
+
 def _make_reply(step, messages, body):
     last_user = ""
     for m in reversed(messages):
@@ -230,20 +239,29 @@ def _make_reply(step, messages, body):
             return json.dumps({"can_answer": False, "reason": "insufficient information", "reformulated_query": None})
         return json.dumps({"can_answer": True, "reason": "passages relevant", "reformulated_query": None})
 
+    if step == "verify":
+        if random.random() < malformed_rate:
+            return "not json either"
+        return json.dumps({"ok": True, "problems": []})
+
     if step == "draft":
-        chunk_ids = _parse_chunk_ids(last_user)
-        # pick 1-2 real chunk ids
-        cites = []
-        if chunk_ids:
-            chosen = random.sample(chunk_ids, min(2, len(chunk_ids)))
-            cites = chosen
+        triples = _parse_citation_triples(last_user)
+        # only real passage headers ([paper_id, page, chunk_id] where the chunk
+        # id contains "chunk"); in-text bracket patterns like [38, 2, 9] that
+        # appear in the papers' extracted text are not citations
+        triples = [(p, pg, cid) for p, pg, cid in triples if "chunk" in cid]
+        # cite real triples exactly as they appear in the prompt so the
+        # pipeline's code-based verify can pass
+        if triples:
+            chosen = random.sample(triples, min(2, len(triples)))
         else:
-            cites = _chunk_ids[:2]
-        # bad citation injection
-        if random.random() < bad_cite_rate and cites:
-            cites = cites + ["nonexistent_chunk_999"]
-        cite_str = " ".join(f"[{cid.split('_')[0]}, 1, {cid}]" for cid in cites)
-        return f"[standin-groq] Based on the papers, regarding '{last_user[:60]}', the attention mechanism computes weighted sums. {cite_str}"
+            chosen = []
+        # bad citation injection (exercises regenerate + refuse paths)
+        if random.random() < bad_cite_rate:
+            chosen = chosen + [("nonexistent-paper", "1", "nonexistent_chunk_999")]
+        cite_str = " ".join(f"[{p}, {pg}, {cid}]" for p, pg, cid in chosen)
+        qline = last_user.split("Passages:")[0].strip()[:80]
+        return f"Based on the papers, regarding '{qline}', the attention mechanism computes weighted sums. {cite_str}"
 
     # default
     return f"[standin-groq] echo: {last_user[:120]}"
@@ -254,8 +272,31 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/v1/chat/completions")
-@app.post("/chat/completions")
+@app.get("/openai/v1/models")
+async def models():
+    """Groq-shaped model listing so the client can verify MODEL_ID."""
+    ids = _cfg("models", default=None)
+    if not ids:
+        ids = ["standin-model"]
+    return {
+        "object": "list",
+        "data": [
+            {"id": mid, "object": "model", "owned_by": "stand-in", "created": 0}
+            for mid in ids
+        ],
+    }
+
+
+@app.get("/openai/v1/stats")
+async def stats():
+    """Counters for the 429 diagnostic (item 7): window usage at this instant."""
+    now = time.time()
+    st = _rate_state(now)
+    st.update({"in_flight": _in_flight, "window_seconds": _limits()["window_seconds"]})
+    return st
+
+
+@app.post("/openai/v1/chat/completions")
 async def chat_completions(request: Request):
     global _in_flight
     body = await request.json()
@@ -356,4 +397,3 @@ async def chat_completions(request: Request):
         async with _in_flight_lock:
             _in_flight = max(0, _in_flight - 1)
         sem.release()
-PY

@@ -1,7 +1,7 @@
 import type { SSEEvent } from "./types";
-import type { AskState, StepTiming } from "./useAsk";
+import type { AskState } from "./useAsk";
 
-export function reduceEvent(prev: AskState, ev: SSEEvent, t0: number): AskState {
+export function reduceEvent(prev: AskState, ev: SSEEvent, _t0: number): AskState {
   const next = { ...prev };
   switch (ev.type) {
     case "step_start": {

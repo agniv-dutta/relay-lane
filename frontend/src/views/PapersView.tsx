@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 const PAPERS = [
   { id: "1706.03762", version: "v7" },

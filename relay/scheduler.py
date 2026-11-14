@@ -8,11 +8,18 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from relay.model_client import RateLimitError, HTTPError
+from relay.model_client import RateLimitError, HTTPError, ModelEndpointUnreachable
 from relay.trace import Trace
 
 
 class DeadlineExceeded(Exception):
+    pass
+
+
+class TokenBudgetExceeded(Exception):
+    """Estimate exceeds bucket capacity: caller must degrade (drop passages)
+    and re-estimate, or finish with status cannot_fit_budget. Never a timeout."""
+
     pass
 
 
@@ -108,13 +115,14 @@ class Scheduler:
     async def _acquire_tokens(self, est: int, deadline: float, trace=None) -> None:
         # If the estimate exceeds bucket capacity, do not clamp silently.
         # Raise so the caller can degrade (shrink passages) or refuse; the
-        # reserved estimate must equal what is sent.
+        # reserved estimate must equal what is sent. Never a DeadlineExceeded:
+        # this is not a wait, it cannot fit.
         if est > self.tpm_bucket.capacity and self.tpm_bucket.capacity > 0:
-            raise DeadlineExceeded(
+            raise TokenBudgetExceeded(
                 f"token budget exceeded: estimate {est} > tpm capacity {self.tpm_bucket.capacity:.0f}"
             )
         if 1 > self.rpm_bucket.capacity and self.rpm_bucket.capacity > 0:
-            raise DeadlineExceeded(
+            raise TokenBudgetExceeded(
                 f"token budget exceeded: rpm estimate 1 > rpm capacity {self.rpm_bucket.capacity:.0f}"
             )
 
@@ -215,15 +223,30 @@ class Scheduler:
         queue_wait = time.time() - queue_start
         step.queue_wait_ms = round(queue_wait * 1000, 2)
 
-        decision_log: dict[str, Any] = {"decision": "admitted", "queue_wait_ms": step.queue_wait_ms, "priority": priority}
+        decision_log: dict[str, Any] = {
+            "decision": "admitted",
+            "queue_wait_ms": step.queue_wait_ms,
+            "priority": priority,
+            "reserved_tokens": est + max_tokens,
+            "reservation": f"est_in {est} + max_tokens {max_tokens} = {est + max_tokens}",
+        }
         if trace is not None:
             trace.decisions.append(decision_log)
         step.extra["scheduler_decision"] = decision_log
 
         retry_time = 0.0
         attempts = 0
+        reserved = est + max_tokens
         try:
-            await self._acquire_tokens(est, deadline, trace=trace)
+            await self._acquire_tokens(reserved, deadline, trace=trace)
+            if trace is not None:
+                trace.decisions.append({
+                    "decision": "reservation",
+                    "step": step.name,
+                    "est_in": est,
+                    "max_tokens": max_tokens,
+                    "reserved": reserved,
+                })
 
             while True:
                 if time.time() >= deadline:
@@ -231,7 +254,7 @@ class Scheduler:
                 attempts += 1
                 t0 = time.time()
                 try:
-                    resp = await client.stream(messages, temperature=temperature, max_tokens=max_tokens, model_override=model, on_token=on_token, response_format=response_format)
+                    resp = await client.stream(messages, temperature=temperature, max_tokens=max_tokens, model_override=model, on_token=on_token, response_format=response_format, step=step.name)
                     step.model_time_ms = round((time.time() - t0) * 1000, 2)
                     step.first_token_ms = resp.first_token_ms
                     step.prompt_tokens = resp.prompt_tokens
@@ -240,11 +263,39 @@ class Scheduler:
                     step.extra["retry_time_ms"] = round(retry_time * 1000, 2)
                     actual = (resp.prompt_tokens or 0) + (resp.completion_tokens or 0)
                     if actual > 0:
-                        self._correct_tokens(est, actual)
+                        # correct the reservation (est_in + max_tokens) with actual usage
+                        self._correct_tokens(reserved, actual)
+                        if trace is not None:
+                            trace.decisions.append({
+                                "decision": "correction",
+                                "step": step.name,
+                                "reserved": reserved,
+                                "actual": actual,
+                                "diff": actual - reserved,
+                            })
                     return resp
+                except ModelEndpointUnreachable as e:
+                    # never retry a misconfigured/unreachable endpoint
+                    decision = {"decision": "failed", "reason": "model_endpoint_unreachable", "detail": e.detail, "retried": False}
+                    if trace is not None:
+                        trace.decisions.append(decision)
+                    step.extra["scheduler_decision"] = decision
+                    raise
                 except RateLimitError as e:
                     if not self.retries_enabled or attempts > self.retry_budget or time.time() >= deadline:
-                        decision = {"decision": "failed", "reason": "rate limited, no retry", "status": 429}
+                        decision = {
+                            "decision": "failed",
+                            "reason": "rate limited, no retry",
+                            "status": 429,
+                            "step": step.name,
+                            "standin_reason": (e.body or "")[:300],
+                            "rpm_bucket": round(self.rpm_bucket.tokens, 1),
+                            "rpm_capacity": self.rpm_bucket.capacity,
+                            "tpm_bucket": round(self.tpm_bucket.tokens, 1),
+                            "tpm_capacity": self.tpm_bucket.capacity,
+                            "reserved": est + max_tokens,
+                            "in_flight": self._in_flight,
+                        }
                         if trace is not None:
                             trace.decisions.append(decision)
                         if self.emit is not None:
@@ -254,7 +305,7 @@ class Scheduler:
                     backoff = self._backoff(attempts, e.retry_after, deadline)
                     await asyncio.sleep(backoff)
                     retry_time += backoff
-                    decision = {"decision": "retry", "reason": "429 rate limited", "backoff_s": round(backoff, 3), "attempt": attempts}
+                    decision = {"decision": "retry", "reason": "429 rate limited", "status": 429, "step": step.name, "reserved": est + max_tokens, "backoff_s": round(backoff, 3), "attempt": attempts}
                     if trace is not None:
                         trace.decisions.append(decision)
                     if self.emit is not None:

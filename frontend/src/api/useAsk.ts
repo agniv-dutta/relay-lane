@@ -133,7 +133,7 @@ export function useAsk() {
       events.push({ delay: acc, ev: { type: "step_end", data: { step: st.name, lane: 0, model_ms: st.model_time_ms, tokens_in: st.prompt_tokens, tokens_out: st.completion_tokens } } });
     }
     // final
-    events.push({ delay: acc + 100, ev: { type: "final", data: { status: trace.refused ? "refused" : "ok", answer: trace.final_answer, citations: [], refusal_reason: trace.refusal_reason, grade_hint: "", total_ms: trace.total_ms } } });
+    events.push({ delay: acc + 100, ev: { type: "final", data: { status: trace.refusal_reason === "cannot_fit_budget" ? "cannot_fit_budget" : trace.refused ? "refused" : "ok", answer: trace.final_answer, citations: [], refusal_reason: trace.refusal_reason, grade_hint: "", total_ms: trace.total_ms } } });
 
     (async () => {
       for (const e of events) {

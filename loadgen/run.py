@@ -18,6 +18,7 @@ import json
 import os
 import random
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,7 +33,8 @@ from relay.scheduler import Scheduler
 SCENARIOS = ["steady", "burst", "sustained_overload", "rpm_halved", "daily_exhausted"]
 
 CSV_COLUMNS = [
-    "request_id", "scenario", "source", "start_time", "first_token_ms", "total_ms",
+    "request_id", "scenario", "source", "model_id", "run_date",
+    "start_time", "first_token_ms", "total_ms",
     "status", "retries", "tokens_in", "tokens_out", "retrieval_setting", "answer_grade",
 ]
 
@@ -159,6 +161,9 @@ async def run_one(
         "request_id": req_id,
         "scenario": scenario,
         "source": source,
+        # metadata: which model produced this row, and when
+        "model_id": args.model,
+        "run_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "start_time": round(start_time, 3),
         "first_token_ms": first_token_ms if first_token_ms is not None else "",
         "total_ms": total_ms if total_ms is not None else "",
@@ -265,7 +270,7 @@ def main():
     args = parser.parse_args()
 
     if args.model is None:
-        args.model = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
+        args.model = os.getenv("MODEL_ID") or os.getenv("MODEL_NAME") or "standin-model"
     if args.source == "real" and args.max_requests is None:
         args.max_requests = 20
         print(f"[real source] defaulting --max-requests to {args.max_requests}")

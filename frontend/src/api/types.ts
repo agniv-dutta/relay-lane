@@ -9,12 +9,13 @@ export interface DegradeEvent { rung: number; reason: string; }
 export interface FirstTokenEvent { }
 export interface TokenEvent { text: string; }
 export interface FinalEvent {
-  status: "ok" | "refused" | "error";
+  status: "ok" | "refused" | "error" | "timeout" | "cannot_fit_budget";
   answer: string;
   citations: { paper: string; page: number; chunk_id: string }[];
   refusal_reason: string | null;
   grade_hint: string;
   total_ms: number | null;
+  detail?: string;
 }
 
 export type SSEEvent =
@@ -28,13 +29,24 @@ export type SSEEvent =
   | { type: "token"; data: TokenEvent }
   | { type: "final"; data: FinalEvent };
 
-export interface LimitsResponse {
-  rpm: { used: number; limit: number; remaining: number };
-  tpm: { used: number; limit: number; remaining: number };
-  rpd: { used: number; limit: number; remaining: number };
-  in_flight: number;
-  queue_length: number;
+export interface LimitBucket {
+  scope: string;
+  used: number | null;
+  remaining: number | null;
+  limit: number | null;
   resets_at: string | null;
+  error: string | null;
+}
+
+export interface LimitsResponse {
+  rpm: LimitBucket;
+  tpm: LimitBucket;
+  real_call_cap: LimitBucket;
+  real_token_cap: LimitBucket;
+  in_flight: number | null;
+  queue_length: number | null;
+  in_flight_error: string | null;
+  queue_length_error: string | null;
 }
 
 export interface SummaryResponse {

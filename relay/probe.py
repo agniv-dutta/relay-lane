@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GROQ_BASE = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-DEFAULT_MODEL = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
+DEFAULT_MODEL = os.getenv("MODEL_ID") or os.getenv("MODEL_NAME") or ""
 RESULTS_DIR = Path("results")
 RAW_LOG = RESULTS_DIR / "probe_raw.jsonl"
 

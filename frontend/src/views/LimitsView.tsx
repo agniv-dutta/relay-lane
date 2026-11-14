@@ -151,7 +151,7 @@ export default function LimitsView() {
         <li>smaller model</li>
         <li>honest "try later" reply</li>
       </ol>
-      {display?.real_request_cap?.limit && display.real_request_cap.scope === "stand_in" && (
+      {display?.rpm?.scope === "stand_in" && (
         <div style={{ color: "var(--color-false)", marginTop: "1rem" }}>Warning: stand-in is active, not the real service.</div>
       )}
       <h2>Stand-in config</h2>

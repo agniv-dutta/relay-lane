@@ -27,6 +27,19 @@ class RateLimitError(HTTPError):
         self.retry_after = retry_after
 
 
+class ModelEndpointUnreachable(Exception):
+    """The model service could not be reached or does not serve the endpoint.
+
+    Raised for connection failures and HTTP 404/405 on the completions path.
+    This is a setup problem, never retried.
+    """
+
+    def __init__(self, detail: str, status: int | None = None):
+        self.detail = detail
+        self.status = status
+        super().__init__(detail)
+
+
 @dataclass
 class ModelResponse:
     text: str
@@ -43,7 +56,7 @@ class ModelClient:
         self,
         base_url: str | None = None,
         api_key: str | None = None,
-        model: str = "llama-3.1-8b-instant",
+        model: str = "standin-model",
         timeout: float = 120.0,
     ) -> None:
         self.base_url = (base_url or os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
@@ -67,6 +80,7 @@ class ModelClient:
         model_override: str | None = None,
         on_token=None,
         response_format=None,
+        step: str | None = None,
     ) -> ModelResponse:
         model = model_override or self.model
         payload = {
@@ -78,6 +92,9 @@ class ModelClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        req_headers = {"Authorization": f"Bearer {self.api_key}"}
+        if step:
+            req_headers["X-Relay-Step"] = step
         start = time.perf_counter()
         first_token = None
         collected: list[str] = []
@@ -86,7 +103,7 @@ class ModelClient:
         status = 0
         body_text = ""
         try:
-            async with self._client.stream("POST", "/chat/completions", json=payload) as resp:
+            async with self._client.stream("POST", "/chat/completions", json=payload, headers=req_headers) as resp:
                 status = resp.status_code
                 headers = {k.lower(): v for k, v in resp.headers.items()}
                 if status == 429:
@@ -95,9 +112,21 @@ class ModelClient:
                     ra = headers.get("retry-after")
                     retry_after = float(ra) if ra else None
                     raise RateLimitError(status=status, retry_after=retry_after, body=body_text)
+                if status in (404, 405):
+                    await resp.aread()
+                    body_text = resp.text
+                    raise ModelEndpointUnreachable(
+                        f"model endpoint not served (HTTP {status}) at {self.base_url}/chat/completions: {body_text[:200]}",
+                        status=status,
+                    )
                 if status >= 400:
                     await resp.aread()
                     body_text = resp.text
+                    # decommissioned/not-found model: readable fail-fast, not a retryable error
+                    if "model_decommissioned" in body_text or "model_not_found" in body_text:
+                        raise ModelEndpointUnreachable(
+                            f"model '{model}' rejected: {body_text[:300]}", status=status
+                        )
                     raise HTTPError(status=status, body=body_text)
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
@@ -124,10 +153,11 @@ class ModelClient:
                                     await on_token(content)
                                 except Exception:
                                     pass
-        except (RateLimitError, HTTPError):
+        except (RateLimitError, HTTPError, ModelEndpointUnreachable):
             raise
-        except Exception as e:
-            raise
+        except httpx.HTTPError as e:
+            # connection/transport failures: setup problem, not a limit
+            raise ModelEndpointUnreachable(f"model endpoint unreachable ({type(e).__name__}: {e}) at {self.base_url}") from e
 
         end = time.perf_counter()
         total_ms = round((end - start) * 1000, 2)
